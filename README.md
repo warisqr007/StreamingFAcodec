@@ -101,7 +101,3 @@ python reconstruct_redecoder.py \
     --redecoder-config-path <redecoder_config_path>
 ```
 same as above, if no checkpoint path or config path is specified, model weights will be automatically downloaded from Hugging Face.
-
-### Real-time voice conversion
-This codec is fully causal, so it can be used for real-time voice conversion.  
-Script are still under development and will be released soon.
