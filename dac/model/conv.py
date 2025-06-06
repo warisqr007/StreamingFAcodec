@@ -183,6 +183,7 @@ class StreamingConv1d(StreamingModule[_StreamingConv1dState]):
         norm: str = "none",
         norm_kwargs: tp.Dict[str, tp.Any] = {},
         pad_mode: str = "reflect",
+        **kwargs
     ):
         super().__init__()
         # warn user on unusual setup between dilation and stride
@@ -285,6 +286,7 @@ class StreamingConvTranspose1d(StreamingModule[_StreamingConvTr1dState]):
         norm: str = "none",
         trim_right_ratio: float = 1.0,
         norm_kwargs: tp.Dict[str, tp.Any] = {},
+        **kwargs
     ):
         super().__init__()
         self.convtr = NormConvTranspose1d(

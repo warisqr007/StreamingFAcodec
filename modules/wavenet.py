@@ -4,6 +4,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from dac.model.encodec import SConv1d
+from dac.model.conv import StreamingConv1d
+from dac.model.streaming import StreamingContainer, StreamingAdd
 
 from . import commons
 LRELU_SLOPE = 0.1
@@ -167,6 +169,152 @@ class WN(torch.nn.Module):
 
     def remove_weight_norm(self):
         if self.gin_channels != 0:
+            torch.nn.utils.remove_weight_norm(self.cond_layer)
+        for l in self.in_layers:
+            torch.nn.utils.remove_weight_norm(l)
+        for l in self.res_skip_layers:
+            torch.nn.utils.remove_weight_norm(l)
+
+
+class WNStreaming(StreamingContainer):
+    """
+    Streaming‐enabled version of WN:
+    - Uses StreamingConv1d in place of SConv1d
+    - Wraps residual/skip adds with StreamingAdd
+    """
+    def __init__(
+        self,
+        hidden_channels: int,
+        kernel_size: int,
+        dilation_rate: int,
+        n_layers: int,
+        gin_channels: int = 0,
+        p_dropout: float = 0,
+        causal: bool = False,
+    ):
+        super().__init__()
+        conv1d_type = StreamingConv1d
+        assert kernel_size % 2 == 1, "kernel_size must be odd"
+
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.gin_channels = gin_channels
+        self.p_dropout = p_dropout
+        self.causal = causal
+
+        # Lists of streaming convs
+        self.in_layers = nn.ModuleList()
+        self.res_skip_layers = nn.ModuleList()
+
+        # One StreamingAdd for each residual‐update step
+        self.res_adds = nn.ModuleList()
+        # One StreamingAdd to accumulate the final "skip" outputs
+        self.out_add = StreamingAdd()
+
+        self.drop = nn.Dropout(p_dropout)
+
+        # Conditioning (1×1) if gin_channels > 0
+        if gin_channels != 0:
+            self.cond_layer = conv1d_type(
+                gin_channels,
+                2 * hidden_channels * n_layers,
+                kernel_size=1,
+                norm="weight_norm",
+            )
+        else:
+            self.cond_layer = None
+
+        for i in range(n_layers):
+            dilation = dilation_rate ** i
+            if causal:
+                # left‐only padding for causal
+                padding = (kernel_size * dilation - dilation)
+            else:
+                # "same" padding split equally
+                padding = (kernel_size * dilation - dilation) // 2
+
+            # Gate conv: produces 2 * hidden_channels
+            in_layer = conv1d_type(
+                hidden_channels,
+                2 * hidden_channels,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                padding=padding,
+                causal=causal,
+                norm="weight_norm",
+            )
+            self.in_layers.append(in_layer)
+
+            # Residual/skip conv: 1x1
+            if i < n_layers - 1:
+                res_skip_channels = 2 * hidden_channels
+            else:
+                res_skip_channels = hidden_channels
+
+            res_skip = conv1d_type(
+                hidden_channels,
+                res_skip_channels,
+                kernel_size=1,
+                padding=0,
+                causal=causal,
+                norm="weight_norm",
+            )
+            self.res_skip_layers.append(res_skip)
+
+            # StreamingAdd to combine x + residual
+            self.res_adds.append(StreamingAdd())
+
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor, g: torch.Tensor = None):
+        """
+        x:      (B, hidden_channels, T)
+        x_mask: (B, 1,               T)   # mask over time
+        g:      (B, gin_channels,    T)   # optional conditioning
+        """
+        # Prepare an accumulator for the skip outputs
+        output = torch.zeros_like(x)
+        # Tensor wrapper for fused_add call
+        n_ch_tensor = torch.IntTensor([self.hidden_channels]).to(x.device)
+
+        # If there's a conditioning stream, run it through a 1×1 conv
+        if g is not None:
+            g = self.cond_layer(g)
+
+        for i in range(self.n_layers):
+            # 1) Gate conv
+            x_in = self.in_layers[i](x)  # (B, 2*hidden, T')
+
+            if g is not None:
+                offset = i * 2 * self.hidden_channels
+                g_l = g[:, offset : offset + 2 * self.hidden_channels, :]
+            else:
+                g_l = torch.zeros_like(x_in)
+
+            acts = commons.fused_add_tanh_sigmoid_multiply(x_in, g_l, n_ch_tensor)
+            acts = self.drop(acts)
+
+            # 2) Residual/skip 1×1 conv
+            res_skip_acts = self.res_skip_layers[i](acts)
+            if i < self.n_layers - 1:
+                # Split into residual and skip channels
+                res_acts = res_skip_acts[:, : self.hidden_channels, :]
+                skip_acts = res_skip_acts[:, self.hidden_channels :, :]
+
+                # residual update: x <- x + res_acts (streaming‐safe)
+                x = self.res_adds[i](x, res_acts)
+                x = x * x_mask
+
+                # accumulate skip
+                output = self.out_add(output, skip_acts)
+            else:
+                # Last layer: all channels go to output (no residual)
+                output = self.out_add(output, res_skip_acts)
+
+        return output * x_mask
+
+    def remove_weight_norm(self):
+        if self.cond_layer is not None:
             torch.nn.utils.remove_weight_norm(self.cond_layer)
         for l in self.in_layers:
             torch.nn.utils.remove_weight_norm(l)

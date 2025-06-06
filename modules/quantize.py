@@ -1,6 +1,6 @@
 from dac.nn.quantize import ResidualVectorQuantize
 from torch import nn
-from modules.wavenet import WN
+from modules.wavenet import WN, WNStreaming
 from modules.style_encoder import StyleEncoder
 from gradient_reversal import GradientReversal
 import torch
@@ -12,6 +12,9 @@ from torch.nn.utils import weight_norm
 from torch import nn, sin, pow
 from einops.layers.torch import Rearrange
 from dac.model.encodec import SConv1d
+from dac.model.conv import StreamingConv1d
+from dac.model.streaming import StreamingContainer
+from dac.model.spectrogram import StreamingMelSpectrogram
 
 def init_weights(m):
     if isinstance(m, nn.Conv1d):
@@ -153,7 +156,9 @@ class MFCC(nn.Module):
         if unsqueezed:
             mfcc = mfcc.squeeze(0)
         return mfcc
-class FAquantizer(nn.Module):
+
+
+class FAquantizer(StreamingContainer):
     def __init__(self, in_dim=1024,
                  n_p_codebooks=1,
                  n_c_codebooks=2,
@@ -164,9 +169,11 @@ class FAquantizer(nn.Module):
                  quantizer_dropout=0.5,
                  causal=False,
                  separate_prosody_encoder=False,
-                 timbre_norm=False,):
+                 timbre_norm=False,
+                 streaming=False):
         super(FAquantizer, self).__init__()
-        conv1d_type = SConv1d# if causal else nn.Conv1d
+        conv1d_type = StreamingConv1d if streaming else SConv1d
+        wntype = WNStreaming if streaming else WN
         self.prosody_quantizer = ResidualVectorQuantize(
             input_dim=in_dim,
             n_codebooks=n_p_codebooks,
@@ -208,7 +215,7 @@ class FAquantizer(nn.Module):
 
         if separate_prosody_encoder:
             self.melspec_linear = conv1d_type(in_channels=20, out_channels=256, kernel_size=1, causal=causal)
-            self.melspec_encoder = WN(hidden_channels=256, kernel_size=5, dilation_rate=1, n_layers=8, gin_channels=0, p_dropout=0.2, causal=causal)
+            self.melspec_encoder = wntype(hidden_channels=256, kernel_size=5, dilation_rate=1, n_layers=8, gin_channels=0, p_dropout=0.2, causal=causal)
             self.melspec_linear2 = conv1d_type(in_channels=256, out_channels=1024, kernel_size=1, causal=causal)
         else:
             pass
@@ -225,9 +232,14 @@ class FAquantizer(nn.Module):
             "n_mels": 80,
         }
 
-        self.to_mel = torchaudio.transforms.MelSpectrogram(
-            n_mels=MEL_PARAMS["n_mels"], sample_rate=24000, **SPECT_PARAMS
-        )
+        if streaming:
+            self.to_mel = StreamingMelSpectrogram(
+                n_mels=MEL_PARAMS["n_mels"], sample_rate=24000, **SPECT_PARAMS
+            )
+        else:
+            self.to_mel = torchaudio.transforms.MelSpectrogram(
+                n_mels=MEL_PARAMS["n_mels"], sample_rate=24000, **SPECT_PARAMS
+            )
         self.mel_mean, self.mel_std = -4, 4
         self.frame_rate = 24000 / 300
         self.hop_length = 300

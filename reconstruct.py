@@ -25,13 +25,15 @@ def load_model(args):
         config_path = args.config_path
     config = yaml.safe_load(open(config_path))
     model_params = recursive_munch(config['model_params'])
-    model = build_model(model_params)
+    model = build_model(model_params, stage = 'streaming_codec')
 
     ckpt_params = torch.load(ckpt_path, map_location="cpu")
     ckpt_params = ckpt_params['net'] if 'net' in ckpt_params else ckpt_params # adapt to format of self-trained checkpoints
 
     for key in ckpt_params:
-        model[key].load_state_dict(ckpt_params[key])
+        if 'fa_predictors' in key:
+            continue  # skip fa_predictors, they are not needed for reconstruction
+        model[key].load_state_dict(ckpt_params[key], strict=False)
 
     _ = [model[key].eval() for key in model]
     _ = [model[key].to(device) for key in model]

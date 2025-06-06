@@ -346,6 +346,57 @@ def build_model(args, stage='codec'):
       discriminator=discriminator,
       fa_predictors=fa_predictors,
     )
+  elif stage == 'streaming_codec':
+    # Generators
+    from dac.model.streaming_dac import Encoder, Decoder
+    from modules.quantize import FAquantizer
+
+    # Discriminators
+    from dac.model.discriminator import Discriminator
+
+    encoder = Encoder(d_model=args.DAC.encoder_dim,
+                      strides=args.DAC.encoder_rates,
+                      d_latent=1024,
+                      causal=args.causal,
+                      lstm=args.lstm,)
+
+    quantizer = FAquantizer(in_dim=1024,
+                            n_p_codebooks=1,
+                            n_c_codebooks=args.n_c_codebooks,
+                            n_t_codebooks=2,
+                            n_r_codebooks=3,
+                            codebook_size=1024,
+                            codebook_dim=8,
+                            quantizer_dropout=0.5,
+                            causal=args.causal,
+                            separate_prosody_encoder=args.separate_prosody_encoder,
+                            timbre_norm=args.timbre_norm,
+                            streaming=True,
+                            )
+
+    decoder = Decoder(
+      input_channel=1024,
+      channels=args.DAC.decoder_dim,
+      rates=args.DAC.decoder_rates,
+      causal=args.causal,
+      lstm=args.lstm,
+    )
+
+    discriminator = Discriminator(
+      rates=[],
+      periods=[2, 3, 5, 7, 11],
+      fft_sizes=[2048, 1024, 512],
+      sample_rate=args.DAC.sr,
+      bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
+    )
+
+    nets = Munch(
+      encoder=encoder,
+      quantizer=quantizer,
+      decoder=decoder,
+      discriminator=discriminator,
+      # fa_predictors=fa_predictors,
+    )
   elif stage == 'beta_vae':
     from dac.model.dac import Encoder, Decoder
     from modules.beta_vae import BetaVAE_Linear

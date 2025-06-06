@@ -13,6 +13,8 @@ Streaming module API that should be implemented by all Streaming components,
 """
 
 import abc
+from typing import Optional, Tuple
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 import itertools
@@ -301,6 +303,72 @@ class RawStreamingConvTranspose1d(
             out = out[..., : OT - invalid_steps]
             self._streaming_state.partial = partial
             return out
+
+
+@dataclass
+class _StreamingLSTMState:
+    """
+    Holds the LSTM hidden+cell states across streaming chunks.
+    """
+    hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None  # (h_n, c_n)
+
+    def reset(self):
+        self.hidden = None
+
+
+class RawStreamingLSTM(StreamingModule[_StreamingLSTMState]):
+    """
+    A “streaming” version of SLSTM: 
+    - If self._streaming_state is None, acts exactly like SLSTM.
+    - Otherwise, it carries forward (h_n, c_n) across chunks.
+    """
+    def __init__(self, dimension: int, num_layers: int = 2, skip: bool = True):
+        super().__init__()
+        self.skip = skip
+        self.lstm = nn.LSTM(dimension, dimension, num_layers)
+        # NOTE: we do NOT register any states here. StreamingModule will set up _streaming_state.
+
+    def _init_streaming_state(self, batch_size: int) -> _StreamingLSTMState:
+        # When streaming begins, the hidden state is initialized to None, so that the first chunk
+        # will use the default zero‐state. After that, we keep storing (h_n, c_n).
+        return _StreamingLSTMState()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, C, T)   where C == dimension
+        Returns y: (B, C, T)
+        """
+        # If not in streaming mode, just do a regular SLSTM forward:
+        if self._streaming_state is None:
+            # permute into (T, B, C), run LSTM, add skip if requested, permute back
+            x_tbc = x.permute(2, 0, 1)               # (T, B, C)
+            y_tbc, _ = self.lstm(x_tbc)             # y_tbc: (T, B, C)
+            if self.skip:
+                y_tbc = y_tbc + x_tbc
+            return y_tbc.permute(1, 2, 0)            # (B, C, T)
+
+        # Otherwise, we are in streaming mode:
+        state: _StreamingLSTMState = self._streaming_state
+
+        # Permute to (T, B, C)
+        x_tbc = x.permute(2, 0, 1)
+
+        # If we have a stored (h_n, c_n), pass it in; otherwise, None → LSTM uses zeros.
+        if state.hidden is None:
+            y_tbc, (h_n, c_n) = self.lstm(x_tbc)
+        else:
+            h_prev, c_prev = state.hidden
+            y_tbc, (h_n, c_n) = self.lstm(x_tbc, (h_prev, c_prev))
+
+        # Store the new hidden+cell for the next chunk
+        state.hidden = (h_n.detach(), c_n.detach())
+
+        # Apply skip‐connection if requested
+        if self.skip:
+            y_tbc = y_tbc + x_tbc
+
+        # Permute back to (B, C, T)
+        return y_tbc.permute(1, 2, 0)
 
 
 def test():
