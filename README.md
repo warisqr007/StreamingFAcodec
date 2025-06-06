@@ -1,4 +1,4 @@
-# Streaming FAcodec
+# Streaming FAcodec (Work in Progress!)
 
 Same as the original FAcodec proposed in paper [NaturalSpeech 3: Zero-Shot Speech Synthesis
 with Factorized Codec and Diffusion Models](https://arxiv.org/pdf/2403.03100) with streaming support.
